@@ -32,6 +32,7 @@ struct ConvConfig {
     float leaky_relu_alpha;  // Alpha value for Leaky ReLU
     int block_size;          // Size of processing blocks
     bool use_ping_pong;      // Enable ping-pong buffering
+    bool debug_mode;         // Enable debug output
 };
 
 // Convolution accelerator class

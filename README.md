@@ -139,6 +139,7 @@ config.activation = RELU;
 config.leaky_relu_alpha = 0.01f;
 config.block_size = 8;
 config.use_ping_pong = true;
+config.debug_mode = false;  // Set to true for debug output
 ```
 
 ## Code Structure

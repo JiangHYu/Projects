@@ -24,6 +24,7 @@ void test_basic_convolution() {
     config.activation = NONE;
     config.block_size = 2;
     config.use_ping_pong = false;
+    config.debug_mode = false;
     
     ConvAccelerator accelerator(config);
     
@@ -68,6 +69,7 @@ void test_relu_activation() {
     config.activation = RELU;
     config.block_size = 2;
     config.use_ping_pong = false;
+    config.debug_mode = false;
     
     ConvAccelerator accelerator(config);
     
@@ -116,6 +118,7 @@ void test_leaky_relu_activation() {
     config.leaky_relu_alpha = 0.1f;
     config.block_size = 2;
     config.use_ping_pong = false;
+    config.debug_mode = false;
     
     ConvAccelerator accelerator(config);
     
@@ -160,6 +163,7 @@ void test_sigmoid_activation() {
     config.activation = SIGMOID;
     config.block_size = 2;
     config.use_ping_pong = false;
+    config.debug_mode = false;
     
     ConvAccelerator accelerator(config);
     
@@ -207,6 +211,7 @@ void test_padding() {
     config.activation = NONE;
     config.block_size = 2;
     config.use_ping_pong = false;
+    config.debug_mode = false;
     
     ConvAccelerator accelerator(config);
     
@@ -242,6 +247,7 @@ void test_ping_pong_buffers() {
     config.activation = NONE;
     config.block_size = 2;
     config.use_ping_pong = true;  // Enable ping-pong buffering
+    config.debug_mode = false;
     
     ConvAccelerator accelerator(config);
     
@@ -271,6 +277,7 @@ void test_block_boundaries() {
     config.activation = NONE;
     config.block_size = 3;  // Not evenly divisible by output size (4x4)
     config.use_ping_pong = false;
+    config.debug_mode = false;
     
     ConvAccelerator accelerator(config);
     
@@ -300,6 +307,7 @@ void test_multiple_channels() {
     config.activation = RELU;
     config.block_size = 2;
     config.use_ping_pong = false;
+    config.debug_mode = false;
     
     ConvAccelerator accelerator(config);
     

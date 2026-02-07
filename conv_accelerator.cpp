@@ -80,13 +80,15 @@ void ConvAccelerator::std_conv(
             int block_end_w = std::min(block_start_w + config.block_size, output_width);
             
             // Check if this is a boundary block
-            if (block_end_h < block_start_h + config.block_size || 
-                block_end_w < block_start_w + config.block_size) {
-                // Boundary block - process with special care
-                std::cout << "Processing boundary block at (" << block_h << ", " << block_w << ")" << std::endl;
-            } else {
-                // Full block - can optimize processing
-                std::cout << "Processing full block at (" << block_h << ", " << block_w << ")" << std::endl;
+            if (config.debug_mode) {
+                if (block_end_h < block_start_h + config.block_size || 
+                    block_end_w < block_start_w + config.block_size) {
+                    // Boundary block - process with special care
+                    std::cout << "Processing boundary block at (" << block_h << ", " << block_w << ")" << std::endl;
+                } else {
+                    // Full block - can optimize processing
+                    std::cout << "Processing full block at (" << block_h << ", " << block_w << ")" << std::endl;
+                }
             }
             
             // Process each output channel
