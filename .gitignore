@@ -1,0 +1,16 @@
+# Build artifacts
+*.o
+*.out
+test_conv_accelerator
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+_codeql_detected_source_root
