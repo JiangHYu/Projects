@@ -5,7 +5,7 @@
 #define Tr 13   // height ���ͼ��Ĵ�С
 #define Tc 13   // width
 #define Tn 4    // Number of channels calculated at a time
-#define Tm 16   // Number of convolution kernels calculated in a single time
+#define Tm 32   // Number of convolution kernels calculated in a single time
 
 #define K 3    // kernel size
 #define P 1    // padding

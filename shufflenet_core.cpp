@@ -1,216 +1,256 @@
 #include "shufflenet_core.h"
 
-// ================= 基本模块 (Stride = 1) =================
-void ShuffleNetV2_Basic_Block(data_t* in_ddr, data_t* out_ddr,
-                              data_t* wt_1x1_1, data_t* bias_1x1_1, data_t* wt_dw,
-                              int ch_in, int fsize) {
-    int half_ch = ch_in / 2;
-    int spatial = fsize * fsize;
+// =====================================================================
+//  DW Conv 3x3 独立算子
+//  设计思路: 模仿 std_conv.cpp 的 Tiling + Ping-Pong Buffer 策略
+//  关键区别: DW Conv 没有输入/输出通道的交叉累加,
+//           第 i 个输入通道只与第 i 个 3x3 卷积核运算, 生成第 i 个输出通道
+// =====================================================================
 
-    // 1. 在片上分配权重缓存
-     data_t w1[MAX_CH_IN/2][MAX_CH_IN/2];
-     data_t b1[MAX_CH_IN/2];
-     data_t wdw[MAX_CH_IN/2][3][3];
+// -------- load_input: 从 DDR 载入 Tn 个通道的输入 Tile --------
+// in1~in4: 4 个 AXI 端口, 每个端口负责 1 个通道 (Tn=4)
+// n: 当前通道组起始索引
+// fm_row, fm_col: 输出 Tile 在输出特征图上的起始行/列
+// fm_size: 输入特征图尺寸 (对 stride=1 是 H_out+2, 对 stride=2 是 (H_out-1)*2+3)
+// stride: 1 或 2
+static void dw_load_input(data_t fm_in_buff[SHUF_Tn][SHUF_TR_IN_S2][SHUF_TC_IN_S2],
+                           data_t* in1, data_t* in2, data_t* in3, data_t* in4,
+                           unsigned short n, unsigned short fm_row, unsigned short fm_col,
+                           unsigned short fm_size, unsigned short stride) {
+    ap_uint<18> size = fm_size * fm_size;
+    // 对 stride=1: 输入 Tile 左上角在 DDR 中的坐标 = (fm_row - 1, fm_col - 1) (padding=1)
+    // 对 stride=2: 输入 Tile 左上角在 DDR 中的坐标 = (fm_row*2 - 1, fm_col*2 - 1)
+    int in_row_start = (stride == 1) ? (fm_row - 1) : (fm_row * 2 - 1);
+    int in_col_start = (stride == 1) ? (fm_col - 1) : (fm_col * 2 - 1);
 
-    for(int co=0; co<half_ch; co++) {
-        b1[co] = bias_1x1_1[co];
-        for(int ci=0; ci<half_ch; ci++) w1[co][ci] = wt_1x1_1[co*half_ch + ci];
-        for(int kr=0; kr<3; kr++)
-            for(int kc=0; kc<3; kc++)
-                wdw[co][kr][kc] = wt_dw[co*9 + kr*3 + kc];
-    }
+    unsigned short tile_h = (stride == 1) ? SHUF_TR_IN_S1 : SHUF_TR_IN_S2;
+    unsigned short tile_w = (stride == 1) ? SHUF_TC_IN_S1 : SHUF_TC_IN_S2;
 
-    // 2. 在片上分配 Tile 缓存 (BRAM 占用极小)
-    static data_t tile_in[MAX_CH_IN][TR_IN_S1][TC_IN_S1];
-    static data_t tile_mid[MAX_CH_IN/2][TR_IN_S1][TC_IN_S1];
-    static data_t tile_out[MAX_CH_IN/2][Tr][Tc];
+    int base_addr = n * size;
 
-    // 3. 开始切片循环
-    for(int r_base=0; r_base<fsize; r_base+=Tr) {
-        for(int c_base=0; c_base<fsize; c_base+=Tc) {
-
-            // --- 载入 16x16 的输入 Tile (自动处理 Padding) ---
-            for(int n=0; n<ch_in; n++) {
-                for(int i=0; i<TR_IN_S1; i++) {
-                    for(int j=0; j<TC_IN_S1; j++) {
+    for (unsigned short rr = 0; rr < tile_h; rr++) {
+        for (unsigned short cc = 0; cc < tile_w; cc++) {
 #pragma HLS PIPELINE II=1
-                        int r_ddr = r_base + i - 1;
-                        int c_ddr = c_base + j - 1;
-                        if (r_ddr >= 0 && r_ddr < fsize && c_ddr >= 0 && c_ddr < fsize)
-                            tile_in[n][i][j] = in_ddr[n*spatial + r_ddr*fsize + c_ddr];
-                        else
-                            tile_in[n][i][j] = 0;
-                    }
-                }
-            }
+            int r_ddr = in_row_start + rr;
+            int c_ddr = in_col_start + cc;
+            int addr = base_addr + r_ddr * fm_size + c_ddr;
 
-            // --- 右分支: 1x1 Conv (16x16 -> 16x16) ---
-            for(int co=0; co<half_ch; co++) {
-                for(int i=0; i<TR_IN_S1; i++) {
-                    for(int j=0; j<TC_IN_S1; j++) {
-                        data_t sum = b1[co];
-                        for(int ci=0; ci<half_ch; ci++) {
-#pragma HLS PIPELINE II=1
-                            sum += tile_in[half_ch + ci][i][j] * w1[co][ci];
-                        }
-                        tile_mid[co][i][j] = sum > (data_t)0 ? sum : (data_t)0; // ReLU
-                    }
-                }
+            data_t v1, v2, v3, v4;
+            if (r_ddr >= 0 && r_ddr < fm_size && c_ddr >= 0 && c_ddr < fm_size) {
+                v1 = *(in1 + addr);
+                v2 = *(in2 + addr + size);
+                v3 = *(in3 + addr + 2 * size);
+                v4 = *(in4 + addr + 3 * size);
+            } else {
+                v1 = (data_t)0;
+                v2 = (data_t)0;
+                v3 = (data_t)0;
+                v4 = (data_t)0;
             }
-
-            // --- 右分支: DW3x3 Conv (16x16 -> 14x14) ---
-            for(int n=0; n<half_ch; n++) {
-                for(int i=0; i<Tr; i++) {
-                    for(int j=0; j<Tc; j++) {
-                        data_t sum = 0;
-#pragma HLS PIPELINE II=1
-                        for(int kr=0; kr<3; kr++) {
-                            for(int kc=0; kc<3; kc++) {
-                                sum += tile_mid[n][i+kr][j+kc] * wdw[n][kr][kc];
-                            }
-                        }
-                        tile_out[n][i][j] = sum;
-                    }
-                }
-            }
-
-            // --- 通道混洗 & 存回 DDR (14x14) ---
-            for(int n=0; n<half_ch; n++) {
-                for(int i=0; i<Tr; i++) {
-                    for(int j=0; j<Tc; j++) {
-                        int r_ddr = r_base + i;
-                        int c_ddr = c_base + j;
-                        if (r_ddr < fsize && c_ddr < fsize) {
-                            data_t left_val = tile_in[n][i+1][j+1]; // 左分支是输入的中心14x14
-                            data_t right_val = tile_out[n][i][j];
-                            // 偶数存左，奇数存右
-                            out_ddr[(2*n)*spatial + r_ddr*fsize + c_ddr] = left_val;
-                            out_ddr[(2*n+1)*spatial + r_ddr*fsize + c_ddr] = right_val;
-                        }
-                    }
-                }
-            }
-
+            fm_in_buff[0][rr][cc] = v1;
+            fm_in_buff[1][rr][cc] = v2;
+            fm_in_buff[2][rr][cc] = v3;
+            fm_in_buff[3][rr][cc] = v4;
         }
     }
 }
 
-// ================= 下采样模块 (Stride = 2) =================
-void ShuffleNetV2_Downsample_Block(data_t* in_ddr, data_t* out_ddr,
-                                   data_t* wt_left_dw, data_t* wt_left_1x1, data_t* bias_left_1x1,
-                                   data_t* wt_right_1x1_1, data_t* bias_right_1x1_1,
-                                   data_t* wt_right_dw,
-                                   data_t* wt_right_1x1_2, data_t* bias_right_1x1_2,
-                                   int ch_in, int fsize_in) {
-    int fsize_out = fsize_in / 2;
-    int spatial_in = fsize_in * fsize_in;
-    int spatial_out = fsize_out * fsize_out;
 
-    // 省略了权重的逐个读取赋值，真实情况和 Basic Block 类似从指针载入片上。
-    // 为了防止代码过长，这里假设它们已经通过 AXI 载入以下片上变量:
-    // wl_dw, wl_1x1, bl_1x1, wr_1x1_1, br_1x1_1, wr_dw, wr_1x1_2, br_1x1_2...
-
-    // 1. 在片上分配 Tile 缓存
-     data_t tile_in[MAX_CH_IN][TR_IN_S2][TC_IN_S2];
-     data_t tile_l_mid[MAX_CH_IN][Tr][Tc];
-     data_t tile_l_out[MAX_CH_IN][Tr][Tc];
-
-     data_t tile_r_mid1[MAX_CH_IN][TR_IN_S2][TC_IN_S2];
-     data_t tile_r_mid2[MAX_CH_IN][Tr][Tc];
-     data_t tile_r_out[MAX_CH_IN][Tr][Tc];
-
-    for(int r_out_base=0; r_out_base<fsize_out; r_out_base+=Tr) {
-        for(int c_out_base=0; c_out_base<fsize_out; c_out_base+=Tc) {
-
-            // --- 载入 30x30 的输入 Tile (处理 stride=2 的 Padding) ---
-            for(int n=0; n<ch_in; n++) {
-                for(int i=0; i<TR_IN_S2; i++) {
-                    for(int j=0; j<TC_IN_S2; j++) {
-                        int r_ddr = r_out_base*2 + i - 1;
-                        int c_ddr = c_out_base*2 + j - 1;
-                        if (r_ddr >= 0 && r_ddr < fsize_in && c_ddr >= 0 && c_ddr < fsize_in)
-                            tile_in[n][i][j] = in_ddr[n*spatial_in + r_ddr*fsize_in + c_ddr];
-                        else
-                            tile_in[n][i][j] = 0;
-                    }
-                }
-            }
-
-            // --- 左分支: DW3x3 (s=2, 30x30 -> 14x14) ---
-            for(int n=0; n<ch_in; n++) {
-                for(int i=0; i<Tr; i++) {
-                    for(int j=0; j<Tc; j++) {
-                        data_t sum = 0;
-                        for(int kr=0; kr<3; kr++)
-                            for(int kc=0; kc<3; kc++)
-                                // 提取特征代码使用假定已载入的权组 wt_left_dw
-                                sum += tile_in[n][i*2+kr][j*2+kc] * wt_left_dw[n*9 + kr*3 + kc];
-                        tile_l_mid[n][i][j] = sum;
-                    }
-                }
-            }
-            // --- 左分支: 1x1 Conv (14x14 -> 14x14) ---
-            for(int co=0; co<ch_in; co++) {
-                for(int i=0; i<Tr; i++) {
-                    for(int j=0; j<Tc; j++) {
-                        data_t sum = bias_left_1x1[co];
-                        for(int ci=0; ci<ch_in; ci++)
-                            sum += tile_l_mid[ci][i][j] * wt_left_1x1[co*ch_in + ci];
-                        tile_l_out[co][i][j] = sum > (data_t)0 ? sum : (data_t)0;
-                    }
-                }
-            }
-
-            // --- 右分支: 1x1 Conv 1 (30x30 -> 30x30) ---
-            for(int co=0; co<ch_in; co++) {
-                for(int i=0; i<TR_IN_S2; i++) {
-                    for(int j=0; j<TC_IN_S2; j++) {
-                        data_t sum = bias_right_1x1_1[co];
-                        for(int ci=0; ci<ch_in; ci++)
-                            sum += tile_in[ci][i][j] * wt_right_1x1_1[co*ch_in + ci];
-                        tile_r_mid1[co][i][j] = sum > (data_t)0 ? sum : (data_t)0;
-                    }
-                }
-            }
-            // --- 右分支: DW3x3 (s=2, 30x30 -> 14x14) ---
-            for(int n=0; n<ch_in; n++) {
-                for(int i=0; i<Tr; i++) {
-                    for(int j=0; j<Tc; j++) {
-                        data_t sum = 0;
-                        for(int kr=0; kr<3; kr++)
-                            for(int kc=0; kc<3; kc++)
-                                sum += tile_r_mid1[n][i*2+kr][j*2+kc] * wt_right_dw[n*9 + kr*3 + kc];
-                        tile_r_mid2[n][i][j] = sum;
-                    }
-                }
-            }
-            // --- 右分支: 1x1 Conv 2 (14x14 -> 14x14) ---
-            for(int co=0; co<ch_in; co++) {
-                for(int i=0; i<Tr; i++) {
-                    for(int j=0; j<Tc; j++) {
-                        data_t sum = bias_right_1x1_2[co];
-                        for(int ci=0; ci<ch_in; ci++)
-                            sum += tile_r_mid2[ci][i][j] * wt_right_1x1_2[co*ch_in + ci];
-                        tile_r_out[co][i][j] = sum > (data_t)0 ? sum : (data_t)0;
-                    }
-                }
-            }
-
-            // --- 混洗并写入 DDR ---
-            for(int n=0; n<ch_in; n++) {
-                for(int i=0; i<Tr; i++) {
-                    for(int j=0; j<Tc; j++) {
+// -------- load_weight: 载入 Tn 个通道的 3x3 DW 卷积核 --------
+// DW 卷积核: weight[ch][3][3], 在 DDR 中按 ch * 9 排列
+static void dw_load_weight(data_t wt_buff[SHUF_Tn][3][3],
+                            data_t* weight,
+                            unsigned short n) {
+    for (unsigned short nn = 0; nn < SHUF_Tn; nn++) {
+        for (unsigned short k = 0; k < 9; k++) {
 #pragma HLS PIPELINE II=1
-                        int r_ddr = r_out_base + i;
-                        int c_ddr = c_out_base + j;
-                        if (r_ddr < fsize_out && c_ddr < fsize_out) {
-                            out_ddr[(2*n)*spatial_out + r_ddr*fsize_out + c_ddr] = tile_l_out[n][i][j];
-                            out_ddr[(2*n+1)*spatial_out + r_ddr*fsize_out + c_ddr] = tile_r_out[n][i][j];
-                        }
+            unsigned short kr = k / 3;
+            unsigned short kc = k % 3;
+            wt_buff[nn][kr][kc] = *(weight + (n + nn) * 9 + k);
+        }
+    }
+}
+
+
+// -------- load_bias: 将 bias 填充到输出缓存中 --------
+static void dw_load_bias(data_t fm_out_buff[SHUF_Tn][SHUF_Tr][SHUF_Tc],
+                          data_t bias_buff[SHUF_MAX_CH],
+                          unsigned short n) {
+    for (unsigned short rr = 0; rr < SHUF_Tr; rr++) {
+        for (unsigned short cc = 0; cc < SHUF_Tc; cc++) {
+#pragma HLS PIPELINE II=1
+            for (unsigned short nn = 0; nn < SHUF_Tn; nn++) {
+#pragma HLS UNROLL
+                fm_out_buff[nn][rr][cc] = bias_buff[n + nn];
+            }
+        }
+    }
+}
+
+
+// -------- compute: DW 3x3 核心计算 --------
+// 关键: 没有输入/输出通道交叉, nn 是一一对应的
+static void dw_compute(data_t fm_in_buff[SHUF_Tn][SHUF_TR_IN_S2][SHUF_TC_IN_S2],
+                        data_t fm_out_buff[SHUF_Tn][SHUF_Tr][SHUF_Tc],
+                        data_t wt_buff[SHUF_Tn][3][3],
+                        unsigned short stride) {
+#pragma HLS ARRAY_PARTITION variable=wt_buff complete dim=1
+#pragma HLS ARRAY_PARTITION variable=fm_out_buff complete dim=1
+#pragma HLS ARRAY_PARTITION variable=fm_in_buff complete dim=1
+
+    for (unsigned short kx = 0; kx < 3; kx++) {
+        for (unsigned short ky = 0; ky < 3; ky++) {
+            for (unsigned short rr = 0; rr < SHUF_Tr; rr++) {
+                for (unsigned short cc = 0; cc < SHUF_Tc; cc++) {
+#pragma HLS PIPELINE II=1
+                    for (unsigned short nn = 0; nn < SHUF_Tn; nn++) {
+#pragma HLS UNROLL
+                        // DW 核心: 通道 nn 的输入 × 通道 nn 的权重 → 通道 nn 的输出
+                        data_t mult = fm_in_buff[nn][rr * stride + kx][cc * stride + ky]
+                                      * wt_buff[nn][kx][ky];
+                        fm_out_buff[nn][rr][cc] = fm_out_buff[nn][rr][cc] + mult;
                     }
                 }
             }
-
         }
+    }
+}
+
+
+// -------- store_output: 将 Tn 个通道的输出 Tile 写回 DDR --------
+static void dw_store_output(data_t fm_out_buff[SHUF_Tn][SHUF_Tr][SHUF_Tc],
+                             data_t* out1, data_t* out2, data_t* out3, data_t* out4,
+                             unsigned short fm_row, unsigned short fm_col, unsigned short n,
+                             unsigned short o_fm_size, unsigned short act) {
+    ap_uint<18> o_size = o_fm_size * o_fm_size;
+
+    for (unsigned short rr = 0; rr < SHUF_Tr; rr++) {
+        for (unsigned short cc = 0; cc < SHUF_Tc; cc++) {
+#pragma HLS PIPELINE II=1
+            // 处理边界: 输出 Tile 可能超出特征图范围
+            if ((fm_row + rr) < o_fm_size && (fm_col + cc) < o_fm_size) {
+                int base_addr = n * o_size + (fm_row + rr) * o_fm_size + fm_col + cc;
+
+                data_t v1 = fm_out_buff[0][rr][cc];
+                data_t v2 = fm_out_buff[1][rr][cc];
+                data_t v3 = fm_out_buff[2][rr][cc];
+                data_t v4 = fm_out_buff[3][rr][cc];
+
+                // 激活函数 (act=1: ReLU)
+                if (act == 1) {
+                    v1 = (v1 > (data_t)0) ? v1 : (data_t)0;
+                    v2 = (v2 > (data_t)0) ? v2 : (data_t)0;
+                    v3 = (v3 > (data_t)0) ? v3 : (data_t)0;
+                    v4 = (v4 > (data_t)0) ? v4 : (data_t)0;
+                }
+
+                *(out1 + base_addr) = v1;
+                *(out2 + base_addr + o_size) = v2;
+                *(out3 + base_addr + 2 * o_size) = v3;
+                *(out4 + base_addr + 3 * o_size) = v4;
+            }
+        }
+    }
+}
+
+
+// -------- next_block: 计算下一个 Tile 的坐标 --------
+static void dw_next_block(unsigned short r, unsigned short c, unsigned short n,
+                           unsigned short &next_r, unsigned short &next_c, unsigned short &next_n,
+                           unsigned short o_fm_size, unsigned short ch) {
+    if (c + SHUF_Tc >= o_fm_size) {
+        if (r + SHUF_Tr >= o_fm_size) {
+            // 当前通道组处理完, 切换到下一组
+            next_n = n + SHUF_Tn;
+            next_r = 0;
+            next_c = 0;
+        } else {
+            next_n = n;
+            next_r = r + SHUF_Tr;
+            next_c = 0;
+        }
+    } else {
+        next_n = n;
+        next_r = r;
+        next_c = c + SHUF_Tc;
+    }
+}
+
+
+// ================= 顶层 DW Conv 函数 =================
+// 完全模仿 std_conv 的调度流程: Ping-Pong + Tile 遍历
+void dwconv(data_t* in1, data_t* in2, data_t* in3, data_t* in4,
+            data_t* weight, data_t* bias,
+            data_t* out1, data_t* out2, data_t* out3, data_t* out4,
+            unsigned short ch, unsigned short fm_size,
+            unsigned short stride, unsigned short act) {
+
+    // 输出特征图尺寸
+    unsigned short o_fm_size = (stride == 1) ? fm_size : fm_size / 2;
+
+    // 片上 bias 缓存 (一次性从 DDR 载入)
+    data_t bias_buff[SHUF_MAX_CH];
+    memcpy((data_t*)bias_buff, (const data_t*)bias, sizeof(data_t) * ch);
+
+    // Ping-Pong 输出缓存
+    data_t fm_out1[SHUF_Tn][SHUF_Tr][SHUF_Tc];
+#pragma HLS ARRAY_PARTITION variable=fm_out1 complete dim=1
+    data_t fm_out2[SHUF_Tn][SHUF_Tr][SHUF_Tc];
+#pragma HLS ARRAY_PARTITION variable=fm_out2 complete dim=1
+
+    // 输入缓存 (只需要一组, 因为 DW Conv 不需要跨通道累加)
+    data_t fm_in_buff[SHUF_Tn][SHUF_TR_IN_S2][SHUF_TC_IN_S2];
+#pragma HLS ARRAY_PARTITION variable=fm_in_buff complete dim=1
+
+    // 权重缓存
+    data_t wt_buff[SHUF_Tn][3][3];
+#pragma HLS ARRAY_PARTITION variable=wt_buff complete dim=1
+
+    // Tile 遍历变量
+    unsigned short r = 0, c = 0, n = 0;
+    unsigned short next_r, next_c, next_n;
+    bool pingpong = true;
+
+    // ---- 计算第一个 Tile ----
+    dw_load_bias(fm_out1, bias_buff, n);
+    dw_load_input(fm_in_buff, in1, in2, in3, in4, n, r, c, fm_size, stride);
+    dw_load_weight(wt_buff, weight, n);
+    dw_compute(fm_in_buff, fm_out1, wt_buff, stride);
+
+    dw_next_block(r, c, n, next_r, next_c, next_n, o_fm_size, ch);
+
+    // ---- Ping-Pong 循环 ----
+    while (true) {
+        if (pingpong) {
+            // 计算下一个 Tile 到 fm_out2, 同时写回 fm_out1
+            dw_load_bias(fm_out2, bias_buff, next_n);
+            dw_load_input(fm_in_buff, in1, in2, in3, in4, next_n, next_r, next_c, fm_size, stride);
+            dw_load_weight(wt_buff, weight, next_n);
+            dw_compute(fm_in_buff, fm_out2, wt_buff, stride);
+            dw_store_output(fm_out1, out1, out2, out3, out4, r, c, n, o_fm_size, act);
+            pingpong = false;
+        } else {
+            dw_load_bias(fm_out1, bias_buff, next_n);
+            dw_load_input(fm_in_buff, in1, in2, in3, in4, next_n, next_r, next_c, fm_size, stride);
+            dw_load_weight(wt_buff, weight, next_n);
+            dw_compute(fm_in_buff, fm_out1, wt_buff, stride);
+            dw_store_output(fm_out2, out1, out2, out3, out4, r, c, n, o_fm_size, act);
+            pingpong = true;
+        }
+
+        n = next_n;
+        r = next_r;
+        c = next_c;
+        dw_next_block(r, c, n, next_r, next_c, next_n, o_fm_size, ch);
+
+        if (next_n >= ch)
+            break;
+    }
+
+    // ---- 写回最后一个 Tile ----
+    if (pingpong) {
+        dw_store_output(fm_out1, out1, out2, out3, out4, r, c, n, o_fm_size, act);
+    } else {
+        dw_store_output(fm_out2, out1, out2, out3, out4, r, c, n, o_fm_size, act);
     }
 }

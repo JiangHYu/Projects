@@ -3,14 +3,14 @@
 
 #include "type.h"
 #include "std_conv.h"
-#include "pwconv.h"     // 保留原来的 pwconv
-#include "maxpool.h"    // 保留原来的 maxpool
-#include "upsample.h"   // 保留原来的 upsample
-#include "shufflenet_core.h" // 引入新的 shufflenet
+#include "pwconv.h"
+#include "maxpool.h"
+#include "upsample.h"
+#include "shufflenet_core.h"
 
-// 顶层函数声明 (名字保持你原本的 conv)
+// 顶层函数声明
 void conv(
-    // === 原有端口 ===
+    // === 原有端口 (YOLOv4-tiny) ===
     data_t* in1, data_t* in2, data_t* in3, data_t* in4,
     data_t* w1,  data_t* w2,  data_t* w3,  data_t* w4,
     data_t* b,
@@ -18,16 +18,13 @@ void conv(
     int ch_in, int ch_out,
     int fsize, int stride, int kernel, int act,
 
-    // === 新增：ShuffleNetV2 专属端口 ===
-    data_t* wt_dw_1,
-    data_t* wt_2,    data_t* bias_2,
-    data_t* wt_dw_2,
-    data_t* wt_3,    data_t* bias_3,
+    // === 新增：ShuffleNetV2 DW Conv 权重端口 ===
+    data_t* dw_weight,
+    data_t* dw_bias,
 
-    // === 新增：大模块模式控制 ===
-    // 0: 原版按 kernel 分发的算子模式
-    // 1: ShuffleNetV2 基本模块 (Stride=1)
-    // 2: ShuffleNetV2 下采样模块 (Stride=2)
+    // === 模式控制 ===
+    // 0: 原版 YOLOv4-tiny 算子模式 (按 kernel 分发)
+    // 1: DW Conv 3x3 算子 (ShuffleNetV2 专用)
     int block_mode
 );
 
