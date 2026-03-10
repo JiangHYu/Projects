@@ -1,50 +1,145 @@
 #include"basic_op.h"
+#include<cstring>
+
+// ==================== åŸæœ‰å‡½æ•° ====================
 
 void conv_leakyrelu(int ch_in,int ch_out,int pad,int stride,int k,int h,int w,
-					data_t* in,data_t *weight,data_t *bias,data_t *out,int act){
-	//Xil_DCacheFlushRange((u32)in,sizeof(data_t)*ch_in*h*w);//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë¢ï¿½ï¿½ï¿½ï¿½DDR
-	//ÉèÖÃÊäÈëÌØÕ÷Í¼µÄÆğÊ¼µØÖ·
-	XConv_Set_in1_V(&conv_inst, (u32)in);
-	XConv_Set_in2_V(&conv_inst, (u32)in);
-	XConv_Set_in3_V(&conv_inst, (u32)in);
-	XConv_Set_in4_V(&conv_inst, (u32)in);
-	//ÉèÖÃ¾í»ıºËÈ¨ÖØµÄÆğÊ¼µØÖ·
-	XConv_Set_w1_V(&conv_inst, (u32)weight);
-	XConv_Set_w2_V(&conv_inst, (u32)weight);
-	XConv_Set_w3_V(&conv_inst, (u32)weight);
-	XConv_Set_w4_V(&conv_inst, (u32)weight);
-	//ÉèÖÃÆ«ÖÃºÍÊä³öÌØÕ÷Í¼µÄÆğÊ¼µØÖ·
-	XConv_Set_b_V(&conv_inst, (u32)bias);
-	XConv_Set_out1_V(&conv_inst, (u32)out);
-	XConv_Set_out2_V(&conv_inst, (u32)out);
-	XConv_Set_out3_V(&conv_inst, (u32)out);
-	XConv_Set_out4_V(&conv_inst, (u32)out);
-	//ÅäÖÃ¾í»ı²ÎÊı
-	XConv_Set_ch_in(&conv_inst,ch_in);
-	XConv_Set_ch_out(&conv_inst,ch_out);
-	XConv_Set_fsize(&conv_inst,h);//¸ß¶ÈºÍ¿í¶ÈÏàÍ¬£¬£¨413*413£©ËùÒÔÖ»´«ÈëÒ»¸öÖµ
-	XConv_Set_stride(&conv_inst,stride);
-	XConv_Set_kernel(&conv_inst,k);
-	XConv_Set_act(&conv_inst,act);
-	//
-	XConv_Start(&conv_inst);
-	while(XConv_IsDone(&conv_inst)==0);
-//	if(k==3&&stride==2)
-//		Xil_DCacheInvalidateRange((u32)((unsigned int)out&0xffffffe0), 32*((ch_out*h*w/4*sizeof(data_t))/32+2));
-//	else
-//	    Xil_DCacheInvalidateRange((u32)((unsigned int)out&0xffffffe0), 32*((ch_out*h*w*sizeof(data_t))/32+2));
+                    data_t* in,data_t *weight,data_t *bias,data_t *out,int act){
+    // è®¾ç½®ç‰¹å¾å›¾èµ·å§‹åœ°å€
+    XConv_Set_in1_V(&conv_inst, (u32)in);
+    XConv_Set_in2_V(&conv_inst, (u32)in);
+    XConv_Set_in3_V(&conv_inst, (u32)in);
+    XConv_Set_in4_V(&conv_inst, (u32)in);
+    // è®¾ç½®å·ç§¯æ ¸æƒé‡çš„èµ·å§‹åœ°å€
+    XConv_Set_w1_V(&conv_inst, (u32)weight);
+    XConv_Set_w2_V(&conv_inst, (u32)weight);
+    XConv_Set_w3_V(&conv_inst, (u32)weight);
+    XConv_Set_w4_V(&conv_inst, (u32)weight);
+    // è®¾ç½®åç½®å’Œè¾“å‡ºç‰¹å¾å›¾çš„èµ·å§‹åœ°å€
+    XConv_Set_b_V(&conv_inst, (u32)bias);
+    XConv_Set_out1_V(&conv_inst, (u32)out);
+    XConv_Set_out2_V(&conv_inst, (u32)out);
+    XConv_Set_out3_V(&conv_inst, (u32)out);
+    XConv_Set_out4_V(&conv_inst, (u32)out);
+    // è®¾ç½®å·ç§¯å‚æ•°
+    XConv_Set_ch_in(&conv_inst, ch_in);
+    XConv_Set_ch_out(&conv_inst, ch_out);
+    XConv_Set_fsize(&conv_inst, h);
+    XConv_Set_stride(&conv_inst, stride);
+    XConv_Set_kernel(&conv_inst, k);
+    XConv_Set_act(&conv_inst, act);
+    // block_mode = 0 (åŸæœ‰æ¨¡å¼)
+    XConv_Set_block_mode(&conv_inst, 0);
+    // DW ç«¯å£è®¾ç½®ä¸º dummy (ä¸ä½¿ç”¨)
+    XConv_Set_dw_weight_V(&conv_inst, (u32)weight);
+    XConv_Set_dw_bias_V(&conv_inst, (u32)bias);
+    //
+    XConv_Start(&conv_inst);
+    while(XConv_IsDone(&conv_inst)==0);
+}
 
+
+// DW Conv 3x3 è°ƒç”¨
+void dw_conv_call(int ch, int h, int w, int stride, int act,
+                  data_t* in, data_t* dw_weight, data_t* dw_bias, data_t* out){
+    // è®¾ç½®ç‰¹å¾å›¾åœ°å€
+    XConv_Set_in1_V(&conv_inst, (u32)in);
+    XConv_Set_in2_V(&conv_inst, (u32)in);
+    XConv_Set_in3_V(&conv_inst, (u32)in);
+    XConv_Set_in4_V(&conv_inst, (u32)in);
+    // è¾“å‡ºåœ°å€
+    XConv_Set_out1_V(&conv_inst, (u32)out);
+    XConv_Set_out2_V(&conv_inst, (u32)out);
+    XConv_Set_out3_V(&conv_inst, (u32)out);
+    XConv_Set_out4_V(&conv_inst, (u32)out);
+    // DW æƒé‡å’Œ bias
+    XConv_Set_dw_weight_V(&conv_inst, (u32)dw_weight);
+    XConv_Set_dw_bias_V(&conv_inst, (u32)dw_bias);
+    // å‚æ•°
+    XConv_Set_ch_in(&conv_inst, ch);
+    XConv_Set_ch_out(&conv_inst, ch);
+    XConv_Set_fsize(&conv_inst, h);
+    XConv_Set_stride(&conv_inst, stride);
+    XConv_Set_act(&conv_inst, act);
+    XConv_Set_kernel(&conv_inst, 3); // dummy, ä¸å½±å“ dwconv
+    // block_mode = 1 (DW Conv æ¨¡å¼)
+    XConv_Set_block_mode(&conv_inst, 1);
+    // w/b ç«¯å£è®¾ç½®ä¸º dummy
+    XConv_Set_w1_V(&conv_inst, (u32)dw_weight);
+    XConv_Set_w2_V(&conv_inst, (u32)dw_weight);
+    XConv_Set_w3_V(&conv_inst, (u32)dw_weight);
+    XConv_Set_w4_V(&conv_inst, (u32)dw_weight);
+    XConv_Set_b_V(&conv_inst, (u32)dw_bias);
+    //
+    XConv_Start(&conv_inst);
+    while(XConv_IsDone(&conv_inst)==0);
 }
 
 
 void conv_init(){
-	XConv_Initialize(&conv_inst, 0);
+    XConv_Initialize(&conv_inst, 0);
 }
 
 
 void sampling(data_t* in,data_t* out,int ch,int fsize,int mode){
-	if(mode==1)   //maxpool
-	    conv_leakyrelu(ch,ch,0,0,2,fsize,fsize,in,in,in,out,0);
-	else //upsample
-		conv_leakyrelu(ch,ch,0,0,0,fsize,fsize,in,in,in,out,0);
+    if(mode==1)   //maxpool
+        conv_leakyrelu(ch,ch,0,0,2,fsize,fsize,in,in,in,out,0);
+    else //upsample
+        conv_leakyrelu(ch,ch,0,0,0,fsize,fsize,in,in,in,out,0);
+}
+
+
+// ==================== ShuffleNetV2 è¾…åŠ©æ“ä½œå®ç° ====================
+
+void channel_pad(data_t* in, data_t* out, int ch_real, int ch_pad, int H, int W){
+    int spatial = H * W;
+    // æ‹·è´æœ‰æ•ˆé€šé“
+    memcpy(out, in, ch_real * spatial * sizeof(data_t));
+    // æœ«å°¾è¡¥é›¶
+    if(ch_pad > ch_real){
+        memset(out + ch_real * spatial, 0, (ch_pad - ch_real) * spatial * sizeof(data_t));
+    }
+}
+
+void channel_unpad(data_t* in, data_t* out, int ch_real, int ch_pad, int H, int W){
+    int spatial = H * W;
+    memcpy(out, in, ch_real * spatial * sizeof(data_t));
+}
+
+void pw_weight_pad(data_t* w_in, data_t* w_out,
+                   int ch_out_real, int ch_in_real,
+                   int ch_out_pad, int ch_in_pad){
+    // w_out å…¨éƒ¨æ¸…é›¶
+    memset(w_out, 0, ch_out_pad * ch_in_pad * sizeof(data_t));
+    // é€è¡Œæ‹·è´æœ‰æ•ˆæƒé‡
+    for(int co = 0; co < ch_out_real; co++){
+        memcpy(w_out + co * ch_in_pad,
+               w_in  + co * ch_in_real,
+               ch_in_real * sizeof(data_t));
+    }
+}
+
+void dw_weight_pad(data_t* w_in, data_t* w_out, int ch_real, int ch_pad){
+    memset(w_out, 0, ch_pad * 9 * sizeof(data_t));
+    memcpy(w_out, w_in, ch_real * 9 * sizeof(data_t));
+}
+
+void bias_pad(data_t* b_in, data_t* b_out, int ch_real, int ch_pad){
+    memset(b_out, 0, ch_pad * sizeof(data_t));
+    memcpy(b_out, b_in, ch_real * sizeof(data_t));
+}
+
+void channel_shuffle(data_t* in, data_t* out, int ch, int H, int W){
+    int spatial = H * W;
+    int half = ch / 2;
+    for(int i = 0; i < half; i++){
+        // å‰åŠé€šé“ â†’ å¶æ•°ä½ç½®
+        memcpy(out + (2*i) * spatial,
+               in + i * spatial,
+               spatial * sizeof(data_t));
+        // ååŠé€šé“ â†’ å¥‡æ•°ä½ç½®
+        memcpy(out + (2*i+1) * spatial,
+               in + (half+i) * spatial,
+               spatial * sizeof(data_t));
+    }
 }

@@ -6,4 +6,4 @@
 
 void yolo_test(string weight_dir, string ref_dir);
 
-#endif // DEBU_H_INCLUDED
+#endif // DEBUG_H_INCLUDED
